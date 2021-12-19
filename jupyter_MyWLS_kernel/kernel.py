@@ -12,6 +12,7 @@ from abc import ABCMeta, abstractmethod
 from typing import List, Dict, Tuple, Sequence
 from shutil import copyfile,move
 from urllib.request import urlopen
+import base64
 import urllib.request
 import urllib.parse
 import platform
@@ -112,7 +113,11 @@ class IREPLWrapper(replwrap.REPLWrapper):
         return pos
 class RealTimeSubprocess(subprocess.Popen):
     inputRequest = "<inputRequest>"
-    def __init__(self, cmd, write_to_stdout, write_to_stderr, read_from_stdin,cwd=None,shell=False,env=None):
+    kobj=None
+    def setkobj(self,k=None):
+        self.kobj=k
+    def __init__(self, cmd, write_to_stdout, write_to_stderr, read_from_stdin,cwd=None,shell=False,env=None,kobj=None):
+        self.kobj=kobj
         self._write_to_stdout = write_to_stdout
         self._write_to_stderr = write_to_stderr
         self._read_from_stdin = read_from_stdin
@@ -142,9 +147,16 @@ class RealTimeSubprocess(subprocess.Popen):
             return res
         stderr_contents = read_all_from_queue(self._stderr_queue)
         if stderr_contents:
-            self._write_to_stderr(stderr_contents.decode('UTF-8', errors='ignore'))
+            if self.kobj!=None:
+                self.kobj._logln(stderr_contents.decode('UTF-8', errors='ignore'),3)
+            else:
+                self._write_to_stderr(stderr_contents.decode('UTF-8', errors='ignore'))
         stdout_contents = read_all_from_queue(self._stdout_queue)
         if stdout_contents:
+            if self.kobj.get_magicsSvalue(magics,"outputtype").startswith("image"):
+                self._write_to_stdout(stdout_contents,magics)
+                magics['_st']["outputtype"]="text/plain"
+                return
             contents = stdout_contents.decode('UTF-8', errors='ignore')
             # if there is input request, make output and then
             # ask frontend for input
@@ -163,7 +175,10 @@ class RealTimeSubprocess(subprocess.Popen):
                 self._write_to_stdout(contents,magics)
     def wait_end(self,magics):
         while self.poll() is None:
+            if self.kobj.get_magicsSvalue(magics,"outputtype").startswith("image"):
+                continue
             self.write_contents(magics)
+        self.write_contents(magics)
         self._write_to_stdout("The process end:"+str(self.pid)+"\n",magics)
         self.write_contents(magics)
         # wait for threads to finish, so output is always shown
@@ -515,15 +530,35 @@ echo "OK"
             else:
                 prestr=self.kernelinfo+' Info:'
                 streamname='stdout'
-            if len(outputtype)>0 and (level!=2 or level!=3):
-                self._write_display_data(mimetype=outputtype,contents=prestr+output)
-                return
+            # if len(outputtype)>0 and (level!=2 or level!=3):
+                # self._write_display_data(mimetype=outputtype,contents=prestr+output)
+                # return
             # Send standard output
             stream_content = {'name': streamname, 'text': prestr+output}
             self.send_response(self.iopub_socket, 'stream', stream_content)
     def _logln(self, output,level=1,outputtype='text/plain'):
         self._log(output+"\n",level=1,outputtype='text/plain')
     def _write_display_data(self,mimetype='text/html',contents=""):
+        try:
+            if mimetype.startswith('image'):
+                metadata ={mimetype:{}}
+                # contents=contents
+                # self._logln(base64.encodebytes(contents))
+                # contents=base64.encodebytes(contents)
+                # contents=urllib.parse.quote(base64.b64encode(contents))
+                header="<div><img alt=\"Output\" src=\"data:image/png;base64,"
+                end="\"></div>"
+                contents=header+base64.encodebytes(contents).decode( errors='ignore')+end
+                mimetype='text/html'
+                metadata = {
+                    # 'text/html' : {
+                    # 'width': 640,
+                    # 'height': 480
+                    # }
+                    }
+        except Exception as e:
+            self._logln("_write_display_data err "+str(e),3)
+            return
         self.send_response(self.iopub_socket, 'display_data', {'data': {mimetype:contents}, 'metadata': {mimetype:{}}})
     def _write_to_stdout(self,contents,magics=None):
         if magics !=None and len(magics['_st']['outputtype'])>0:
@@ -728,7 +763,7 @@ echo "OK"
             return RealTimeSubprocess(cmd,
                                   self._write_to_stdout,
                                   self._write_to_stderr,
-                                  self._read_from_stdin,cwd,shell,env)
+                                  self._read_from_stdin,cwd,shell,env,self)
         except Exception as e:
             self._write_to_stdout("RealTimeSubprocess err:"+str(e))
             raise
@@ -1150,23 +1185,23 @@ echo "OK"
                 finally:
                     pass
 class WLScriptKernel(MyKernel):
-    implementation = 'jupyter_MyVBScript_kernel'
+    implementation = 'jupyter_MyWLS_kernel'
     implementation_version = '1.0'
-    language = 'VB Script'
+    language = 'Wolfram Language'
     language_version = '2.X.X'
-    language_info = {'name': 'vbscript',
-                     'mimetype': 'text/x-vbscript',
-                     'file_extension': '.vbs'}
+    language_info = {'name': 'Wolfram Language',
+                     'mimetype': 'text/wolfram',
+                     'file_extension': '.wls'}
     runfiletype='script'
-    banner = "vbscript kernel.\n" \
-             "Uses vbscript, creates source code files and executables in temporary folder.\n"
+    banner = "wolframscript kernel.\n" \
+             "Uses wolframscript, creates source code files and executables in temporary folder.\n"
     main_head = "\n" \
             "\n" \
             "int main(List<String> arguments){\n"
     main_foot = "\nreturn 0;\n}"
     def __init__(self, *args, **kwargs):
         super(WLScriptKernel, self).__init__(*args, **kwargs)
-        self.kernelinfo='[MyVBS Kernel]'
+        self.kernelinfo='[MyWLS Kernel]'
         self._allow_stdin = True
         self.readOnlyFileSystem = False
         self.bufferedOutput = True
@@ -1192,12 +1227,16 @@ class WLScriptKernel(MyKernel):
         retstr=''
         # bcancel_exec,retstr=self.raise_plugin(code,magics,return_code,fil_ename,3,1)
         # if bcancel_exec:return bcancel_exec,retinfo,magics, code,fil_ename,retstr
-        self._logln("The process :"+fil_ename)
+        # self._logln("The process :"+fil_ename)
         fil_ename=self.getrealpath(fil_ename)
         runprgargs=self.get_magicsSvalue(magics,'runprgargs')
-        cmds=['wolframscript',fil_ename]
+        cmds=[]
+        if self.sys=="Windows":
+            cmds=['cmd','/c']
+        cmds+=['wolframscript']
         if (len(runprgargs)>0):
-            cmds=['wolframscript']+runprgargs+[fil_ename]
+            cmds+=runprgargs
+        cmds+=['-f',fil_ename]
         p = self.create_jupyter_subprocess(cmds+ magics['_st']['args'],cwd=None,shell=False,env=self.addkey2dict(magics,'env'),magics=magics)
         self.g_rtsps[str(p.pid)]=p
         return_code=p.returncode
@@ -1207,8 +1246,8 @@ class WLScriptKernel(MyKernel):
             self._write_to_stdout("The process PID:"+str(p.pid)+"\n")
         return_code=p.wait_end(magics)
         # self.cleanup_files()
-        if p.returncode != 0:
-            self._log("Executable exited with code {}".format(p.returncode),2)
+        if return_code != 0:
+            self._log("Executable exited with code {}".format(return_code),2)
         return bcancel_exec,retinfo,magics, code,fil_ename,retstr
     def do_compile_code(self,return_code,fil_ename,magics,code, silent, store_history=True,
                     user_expressions=None, allow_stdin=True):
