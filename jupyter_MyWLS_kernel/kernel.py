@@ -1262,7 +1262,7 @@ class WLScriptKernel(MyKernel):
     implementation = 'jupyter_MyWLS_kernel'
     implementation_version = '1.0'
     language = 'Wolfram'
-    language_version = '2.X.X'
+    language_version = ''
     language_info = {'name': 'Wolfram Language',
                      'mimetype': 'text/wolfram',
                      'file_extension': '.wls'}
